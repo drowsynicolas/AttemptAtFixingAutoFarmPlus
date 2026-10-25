@@ -1,42 +1,47 @@
 local shared = odh_shared_plugins
+
 task.spawn(function()
     shared.load_from_github_url("/aux0on/CrashHandler/refs/heads/main/Prevention.lua")
 end)
 
 if shared.game_name ~= "Murder Mystery 2" then return end
+
 local afp = shared.CreateTab("Autofarm+", "/aux0on/AFPIcon/refs/heads/main/Untitled163_20260919023714")
 local combat_section = afp:AddSection("Autofarm+")
-
--- 🚨 OPTIMIZED WHITELIST (Dictionary for O(1) lookups) 🚨
-local whitelist = {}
 
 local Players = game:GetService("Players")
 while not Players.LocalPlayer do task.wait() end
 local player = Players.LocalPlayer
 
-local trueAntiVoidConnection
-local originalDestroyHeight = workspace.FallenPartsDestroyHeight
-
-local function setupAntiVoid()
-    if not player then return end
-    if trueAntiVoidConnection then
-        trueAntiVoidConnection:Disconnect()
-        trueAntiVoidConnection = nil
-    end
-    workspace.FallenPartsDestroyHeight = 0/0
-    trueAntiVoidConnection = player.CharacterAdded:Connect(function(char)
-        task.wait(0.1)
-        workspace.FallenPartsDestroyHeight = 0/0
-    end)
-end
-
-local vU = game:GetService("VirtualUser")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local vU = game:GetService("VirtualUser")
 
--- 🚨 MAID CLASS FOR CLEANUP 🚨
+local whitelist = {}
+local trueAntiVoidConnection
+local originalDestroyHeight = workspace.FallenPartsDestroyHeight
+
+local autoKillAllEnabled = false
+local autoShootMurdEnabled = false
+local autoResetMurdEnabled = false
+local autoResetSheriffEnabled = false
+local resetAllEnabled = false
+local noRenderEnabled = false
+local autoGGEnabled = false
+
+local isResetting = false
+local hasFlingedMurdererThisLife = false
+local hasExecutedThisLife = false
+local shootLoopThread = nil
+
+local sheriffFlingMaid = nil
+local resetAllMaid = nil
+local autoGGMaid = nil
+
+local blackScreenGui = nil
+local blackScreenFrame = nil
+
 local Maid = {}
 Maid.__index = Maid
 
@@ -55,8 +60,7 @@ function Maid:_cleanupTask(task)
     if t == "RBXScriptConnection" then task:Disconnect()
     elseif t == "Instance" then task:Destroy()
     elseif t == "function" then task()
-    elseif t == "table" and type(task.Destroy) == "function" then task:Destroy()
-    end
+    elseif t == "table" and type(task.Destroy) == "function" then task:Destroy() end
 end
 
 function Maid:DoCleaning()
@@ -69,8 +73,19 @@ end
 function Maid:Destroy() self:DoCleaning() end
 
 local RootMaid = Maid.new()
-
 local noclipEnabled = false
+
+local function setupAntiVoid()
+    if trueAntiVoidConnection then
+        trueAntiVoidConnection:Disconnect()
+        trueAntiVoidConnection = nil
+    end
+    workspace.FallenPartsDestroyHeight = 0/0
+    trueAntiVoidConnection = player.CharacterAdded:Connect(function(char)
+        task.wait(0.1)
+        workspace.FallenPartsDestroyHeight = 0/0
+    end)
+end
 
 local function applyNoclipNow()
     local character = player.Character
@@ -108,9 +123,9 @@ end))
 
 local roleCache = { data = nil, timestamp = 0, TTL = 0.8 }
 
-local function getCachedRoleData()
+local function getCachedRoleData(forceRefresh)
     local now = tick()
-    if roleCache.data and (now - roleCache.timestamp) < roleCache.TTL then
+    if not forceRefresh and roleCache.data and (now - roleCache.timestamp) < roleCache.TTL then
         return roleCache.data
     end
     local ok, result = pcall(function()
@@ -134,72 +149,6 @@ local function getMyRole()
     return nil
 end
 
-local autoKillAllEnabled = false
-local autoShootMurdEnabled = false
-local autoResetMurdEnabled = false
-local autoResetSheriffEnabled = false
-local resetAllEnabled = false
-local noRenderEnabled = false
-local autoGGEnabled = false
-
-local afkConnection
-local isResetting = false
-
-local sheriffFlingMaid = nil
-local resetAllMaid = nil
-local autoGGMaid = Maid.new()
-RootMaid:GiveTask(autoGGMaid)
-
-local resetAllState = "waiting"
-local hasFlingedMurdererThisLife = false
-local hasExecutedThisLife = false
-
-local blackScreenGui = nil
-local blackScreenFrame = nil
-local shootLoopThread = nil
-
-local function CreateBlackScreen()
-    if blackScreenGui then return end
-    blackScreenGui = Instance.new("ScreenGui")
-    blackScreenGui.Name = "NoRenderBackground"
-    blackScreenGui.DisplayOrder = -99999
-    blackScreenGui.IgnoreGuiInset = true
-    blackScreenGui.ResetOnSpawn = false
-    blackScreenFrame = Instance.new("Frame")
-    blackScreenFrame.Size = UDim2.new(1, 0, 1, 0)
-    blackScreenFrame.BackgroundColor3 = Color3.fromRGB(0,0,0)
-    blackScreenFrame.BorderSizePixel = 0
-    blackScreenFrame.Parent = blackScreenGui
-    blackScreenGui.Parent = player:WaitForChild("PlayerGui")
-end
-
-local function RemoveBlackScreen()
-    if blackScreenGui then
-        blackScreenGui:Destroy()
-        blackScreenGui = nil
-        blackScreenFrame = nil
-    end
-end
-
-local function ToggleNoRender()
-    noRenderEnabled = not noRenderEnabled
-    RunService:Set3dRenderingEnabled(not noRenderEnabled)
-    if noRenderEnabled then CreateBlackScreen() else RemoveBlackScreen() end
-end
-
-local function SetNoRenderState(state)
-    if state == noRenderEnabled then return end
-    ToggleNoRender()
-end
-
-local function CleanupNoRender()
-    if noRenderEnabled then
-        RunService:Set3dRenderingEnabled(true)
-        RemoveBlackScreen()
-        noRenderEnabled = false
-    end
-end
-
 local function getRole()
     local bp = player:FindFirstChild("Backpack")
     local char = player.Character
@@ -215,22 +164,18 @@ local function isWhitelisted(p)
     return whitelist[p.UserId] == true
 end
 
-local function getMurd()
-    local roleData = getCachedRoleData()
+local function getMurd(forceRefresh)
+    local roleData = getCachedRoleData(forceRefresh)
     if roleData then
         for playerName, data in pairs(roleData) do
             if data.Role == "Murderer" and not data.Killed and not data.Dead then
                 local p = Players:FindFirstChild(playerName)
-                if p and p ~= player and not isWhitelisted(p) then return p end
-            end
-        end
-    end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= player and not isWhitelisted(plr) then
-            local bp = plr:FindFirstChild("Backpack")
-            local char = plr.Character
-            if (bp and bp:FindFirstChild("Knife")) or (char and char:FindFirstChild("Knife")) then
-                return plr
+                if p and p ~= player and not isWhitelisted(p) and p.Character then
+                    local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        return p 
+                    end
+                end
             end
         end
     end
@@ -281,6 +226,35 @@ end
 
 local function hasKnife()
     return getKnife() ~= nil
+end
+
+local function equipGun()
+    local gun = getGun()
+    if not gun then return false end
+    if gun.Parent == player.Character then return true end
+    if gun.Parent == player.Backpack then
+        local char = player.Character
+        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:EquipTool(gun)
+            for _ = 1, 10 do
+                task.wait(0.1)
+                if gun.Parent == char then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function unequipGun()
+    local char = player.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    local gun = getGun()
+    if gun and gun.Parent == char then
+        local backpack = player:FindFirstChild("Backpack")
+        if backpack then gun.Parent = backpack end
+    end
 end
 
 local function touch(a, b)
@@ -443,36 +417,6 @@ local function killAllExceptOne()
     return true
 end
 
-local function equipGun()
-    local gun = getGun()
-    if not gun then return false end
-    if gun.Parent == player.Character then return true end
-    if gun.Parent == player.Backpack then
-        local char = player.Character
-        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            humanoid:EquipTool(gun)
-            for _ = 1, 10 do
-                task.wait(0.1)
-                if gun.Parent == char then return true end
-            end
-        end
-    end
-    return false
-end
-
-local function unequipGun()
-    local char = player.Character
-    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    local gun = getGun()
-    if gun and gun.Parent == char then
-        local backpack = player:FindFirstChild("Backpack")
-        if backpack then gun.Parent = backpack end
-    end
-end
-
--- 🚨 NEW INSTANT SHOOT LOGIC 🚨
 local function shootMurd()
     if not equipGun() then return end
     task.wait(0.1)
@@ -481,15 +425,22 @@ local function shootMurd()
     if not gun then return end
     
     local handle = gun:FindFirstChild("Handle")
-    local shootRemote = gun:FindFirstChild("Shoot") or gun:FindFirstChild("FireGun") or gun:FindFirstChild("Events") and gun.Events:FindFirstChild("Shoot")
+    local shootRemote = gun:FindFirstChild("Shoot")
     
-    if handle and shootRemote then
-        local startCF = handle.CFrame
-        local endCF = CFrame.new(handle.Position + handle.CFrame.LookVector * 100)
-        pcall(function()
-            shootRemote:FireServer(startCF, endCF)
-        end)
-    end
+    if not handle or not shootRemote then return end
+
+    local murd = getMurd(true)
+    if not murd or not murd.Character then return end
+    
+    local targetPart = murd.Character:FindFirstChild("Head") or murd.Character:FindFirstChild("HumanoidRootPart")
+    if not targetPart then return end
+
+    local startCF = handle.CFrame
+    local endCF = CFrame.new(targetPart.Position) 
+    
+    pcall(function()
+        shootRemote:FireServer(startCF, endCF)
+    end)
 end
 
 local function startShootingMurderer()
@@ -534,6 +485,8 @@ local function executeResetAll()
         end
     end
 end
+
+local resetAllState = "waiting"
 
 local function startResetAllMonitor()
     if resetAllMaid then resetAllMaid:Destroy() end
@@ -607,31 +560,31 @@ local function stopSheriffFling()
     updateNoclip()
 end
 
--- 🚨 FIXED AUTO RESET MURDERER (Waits for murderer) 🚨
 local function flingMurdererOnRespawn()
     if not autoResetMurdEnabled or hasFlingedMurdererThisLife then return end
+    
+    roleCache.data = nil
+    roleCache.timestamp = 0
+    
     local role = getMyRole() or getRole()
     if role == "Murderer" then return end
     if autoShootMurdEnabled and hasGun() then return end
 
-    -- Poll for up to 10 seconds to wait for server data to register the murderer
     local timeout = tick() + 10
     while tick() < timeout and autoResetMurdEnabled and not hasFlingedMurdererThisLife do
         if hasKnife() or (autoShootMurdEnabled and hasGun()) then break end
-        local murd = getMurd()
-        if murd and murd.Character then
-            local hum = murd.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
-                resetPlayer(murd, 3)
-                hasFlingedMurdererThisLife = true
-                break
-            end
+        
+        local murd = getMurd(true) 
+        
+        if murd then
+            resetPlayer(murd, 3)
+            hasFlingedMurdererThisLife = true
+            break
         end
         task.wait(0.5)
     end
 end
 
--- 🚨 OPTIMIZED COIN AURA (No more FPS drops) 🚨
 local auraData = { enabled = false, thread = nil, radius = 8 }
 local cachedContainers = {}
 local lastContainerScan = 0
@@ -663,7 +616,7 @@ local function startAura()
     auraData.enabled = true
     auraData.thread = task.spawn(function()
         while auraData.enabled do
-            task.wait(0.05) -- 20 times a sec instead of 60
+            task.wait(0.05)
             local character = player.Character
             local rootPart = character and character:FindFirstChild("HumanoidRootPart")
             if rootPart then
@@ -686,7 +639,6 @@ local function stopAura()
     end
 end
 
--- 🚨 MAIN EVENT LISTENERS 🚨
 task.spawn(function()
     local CoinCollected = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Gameplay"):WaitForChild("CoinCollected")
     CoinCollected.OnClientEvent:Connect(function(_, currentCoins, maxCoins)
@@ -722,19 +674,22 @@ end)
 RootMaid:GiveTask(player.CharacterAdded:Connect(function()
     hasExecutedThisLife = false
     hasFlingedMurdererThisLife = false
+    roleCache.data = nil
+    roleCache.timestamp = 0
+    
     if noRenderEnabled then
         task.wait(0.5)
         RunService:Set3dRenderingEnabled(false)
         CreateBlackScreen()
     end
     if shootLoopThread then task.cancel(shootLoopThread) shootLoopThread = nil end
+    
     task.spawn(function()
         task.wait(1.5)
         flingMurdererOnRespawn()
     end)
 end))
 
--- 🚨 UI TOGGLES 🚨
 combat_section:AddToggle("Disable 3D Rendering", function(v) SetNoRenderState(v) end)
 
 combat_section:AddToggle("Auto-Kill All", function(v)
